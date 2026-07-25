@@ -12,16 +12,28 @@ export function registerSetProjectRootTool(server) {
             },
         },
         async ({ path }) => {
-            setProjectRoot(path);
+            try {
+                setProjectRoot(path);
 
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Project root set to:\n${path}`,
-                    },
-                ],
-            };
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Project root set to:\n${path}`,
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    isError: true,
+                    content: [
+                        {
+                            type: "text",
+                            text: error.message,
+                        },
+                    ],
+                };
+            }
         }
     );
 }
