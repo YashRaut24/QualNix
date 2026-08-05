@@ -2,6 +2,7 @@ import {McpServer} from "@modelcontextprotocol/sdk/server/mcp.js";
 import {StdioServerTransport} from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerPingTool } from "./tools/ping.js";
 import { registerSetProjectRootTool } from "./tools/setProjectRoot.js";
+import { registerReadFileTool } from "./tools/readFile.js";
 
 export async function createServer(){
     const server = new McpServer({
@@ -11,6 +12,7 @@ export async function createServer(){
 
     registerPingTool(server);
     registerSetProjectRootTool(server);
+    registerReadFileTool(server);
 
     const transport = new StdioServerTransport();
 
