@@ -5,6 +5,7 @@ import { registerSetProjectRootTool } from "./tools/setProjectRoot.js";
 import { registerReadFileTool } from "./tools/readFile.js";
 import { registerListDirectoryTool } from "./tools/listDirectory.js";
 import { registerSearchFilesTool } from "./tools/searchFiles.js";
+import { registerFileInfoTool } from "./tools/fileInfo.js";
 
 export async function createServer(){
     const server = new McpServer({
@@ -17,6 +18,7 @@ export async function createServer(){
     registerReadFileTool(server);
     registerListDirectoryTool(server);
     registerSearchFilesTool(server);
+    registerFileInfoTool(server);
 
     const transport = new StdioServerTransport();
 
