@@ -3,6 +3,7 @@ import {StdioServerTransport} from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerPingTool } from "./tools/ping.js";
 import { registerSetProjectRootTool } from "./tools/setProjectRoot.js";
 import { registerReadFileTool } from "./tools/readFile.js";
+import { registerListDirectoryTool } from "./tools/listDirectory.js";
 
 export async function createServer(){
     const server = new McpServer({
@@ -13,7 +14,8 @@ export async function createServer(){
     registerPingTool(server);
     registerSetProjectRootTool(server);
     registerReadFileTool(server);
-
+    registerListDirectoryTool(server);
+    
     const transport = new StdioServerTransport();
 
     await server.connect(transport);
