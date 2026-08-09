@@ -7,6 +7,8 @@ import { registerListDirectoryTool } from "./tools/listDirectory.js";
 import { registerSearchFilesTool } from "./tools/searchFiles.js";
 import { registerFileInfoTool } from "./tools/fileInfo.js";
 import { registerScanProjectTool } from "./tools/scanProject.js";
+import { registerDetectProjectTool } from "./tools/detectProject.js";
+import { registerDiscoverInterfacesTool } from "./tools/discoverInterfaces.js";
 
 export async function createServer(){
     const server = new McpServer({
@@ -21,6 +23,8 @@ export async function createServer(){
     registerSearchFilesTool(server);
     registerFileInfoTool(server);
     registerScanProjectTool(server);
+    registerDetectProjectTool(server);
+    registerDiscoverInterfacesTool(server);
 
     const transport = new StdioServerTransport();
 
