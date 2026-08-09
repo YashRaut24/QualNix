@@ -1,9 +1,50 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { z } from "zod";
+import path from "node:path";
 import { resolveProjectPath } from "../utils/pathUtils.js";
 import { scanProjectDirectory } from "../utils/projectScanner.js";
 import { interfaceDetectors } from "../utils/interfaceDetectors/index.js";
+
+function detectLanguage(filePath) {
+    const extension = path.extname(filePath).toLowerCase();
+
+    if (extension === ".js" || extension === ".mjs" || extension === ".cjs") {
+        return "javascript";
+    }
+
+    if (extension === ".ts" || extension === ".tsx") {
+        return "typescript";
+    }
+
+    if (extension === ".py") {
+        return "python";
+    }
+
+    if (extension === ".java") {
+        return "java";
+    }
+
+    if (extension === ".cs") {
+        return "csharp";
+    }
+
+    if (extension === ".go") {
+        return "go";
+    }
+
+    if (extension === ".rb") {
+        return "ruby";
+    }
+
+    if (extension === ".php") {
+        return "php";
+    }
+
+    if (extension === ".rs") {
+        return "rust";
+    }
+
+    return null;
+}
 
 export function registerDiscoverInterfacesTool(server) {
     server.registerTool(
@@ -11,7 +52,7 @@ export function registerDiscoverInterfacesTool(server) {
         {
             title: "Discover Interfaces",
             description:
-                "Discovers application interfaces such as HTTP routes and realtime events.",
+                "Discovers application interfaces across supported languages and frameworks.",
             inputSchema: {
                 path: z
                     .string()
@@ -33,17 +74,20 @@ export function registerDiscoverInterfacesTool(server) {
                 const interfaces = [];
 
                 for (const file of files) {
-                    if (
-                        !file.endsWith(".js") &&
-                        !file.endsWith(".mjs") &&
-                        !file.endsWith(".cjs")
-                    ) {
+                    const language = detectLanguage(file);
+
+                    if (!language) {
                         continue;
                     }
 
                     const absolutePath = resolveProjectPath(file);
 
-                    for (const detector of interfaceDetectors) {
+                    const applicableDetectors =
+                        interfaceDetectors.filter((detector) =>
+                            detector.languages.includes(language)
+                        );
+
+                    for (const detector of applicableDetectors) {
                         try {
                             const detected =
                                 await detector.detect(absolutePath);
@@ -51,6 +95,7 @@ export function registerDiscoverInterfacesTool(server) {
                             for (const item of detected) {
                                 interfaces.push({
                                     ...item,
+                                    language,
                                     file,
                                 });
                             }
