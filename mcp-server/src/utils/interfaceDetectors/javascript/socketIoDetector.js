@@ -15,6 +15,9 @@ const SERVER_CONNECTION_PATTERN =
 const SOCKET_IO_SERVER_PATTERN =
     /\bnew\s+Server\s*\(/i;
 
+const SOCKET_IO_SERVER_IMPORT_PATTERN =
+    /(?:from\s*["'`]socket\.io["'`]|require\s*\(\s*["'`]socket\.io["'`]\s*\))/i;
+
 const SOCKET_IO_CLIENT_IMPORT_PATTERN =
     /(?:from\s*["'`]socket\.io-client["'`]|require\s*\(\s*["'`]socket\.io-client["'`]\s*\))/i;
 
@@ -37,10 +40,11 @@ export async function detectSocketIoEvents(filePath) {
 
     const isServer =
         SERVER_CONNECTION_PATTERN.test(content) ||
-        SOCKET_IO_SERVER_PATTERN.test(content);
+        (SOCKET_IO_SERVER_PATTERN.test(content) &&
+            SOCKET_IO_SERVER_IMPORT_PATTERN.test(content));
 
     const isClient =
-        SOCKET_IO_CLIENT_IMPORT_PATTERN.test(content) ||
+        SOCKET_IO_CLIENT_IMPORT_PATTERN.test(content) &&
         SOCKET_IO_CLIENT_FACTORY_PATTERN.test(content);
 
     if (!isServer && !isClient) {

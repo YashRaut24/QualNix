@@ -5,7 +5,7 @@ const DECORATOR_PATTERN =
 
 function extractMethods(argumentsText, decorator) {
     const methodsMatch = argumentsText.match(
-        /methods\s*=\s*\[([\s\S]*?)\]/i
+        /methods\s*=\s*[\[\(]([\s\S]*?)[\]\)]/i
     );
 
     if (methodsMatch) {
@@ -32,6 +32,16 @@ function extractMethods(argumentsText, decorator) {
 export async function detectFlaskRoutes(filePath) {
     const content = await fs.readFile(filePath, "utf-8");
 
+    const hasFlaskEvidence =
+        /from\s+flask\s+import\b/.test(content) ||
+        /import\s+flask\b/.test(content) ||
+        /\b(?:Flask|Blueprint)\s*\(/.test(content) ||
+        /@(?:app|router)\.route\s*\(/.test(content);
+
+    if (!hasFlaskEvidence) {
+        return [];
+    }
+
     const interfaces = [];
     let match;
 
@@ -42,7 +52,7 @@ export async function detectFlaskRoutes(filePath) {
         const argumentsText = match[2];
 
         const pathMatch = argumentsText.match(
-            /^\s*["'`]([^"'`]+)["'`]/
+            /(?:^\s*|rule\s*=\s*)["'`]([^"'`]+)["'`]/
         );
 
         if (!pathMatch) {

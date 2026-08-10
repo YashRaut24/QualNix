@@ -9,6 +9,15 @@ const RE_PATH_PATTERN =
 export async function detectDjangoRoutes(filePath) {
     const content = await fs.readFile(filePath, "utf-8");
 
+    const hasDjangoEvidence =
+        /from\s+django\.urls\s+import\b/.test(content) ||
+        /import\s+django\.urls\b/.test(content) ||
+        /\burlpatterns\s*=/.test(content);
+
+    if (!hasDjangoEvidence) {
+        return [];
+    }
+
     const interfaces = [];
 
     let match;

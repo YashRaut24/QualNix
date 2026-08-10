@@ -4,46 +4,47 @@ import { resolveProjectPath } from "../utils/pathUtils.js";
 import { scanProjectDirectory } from "../utils/projectScanner.js";
 import { interfaceDetectors } from "../utils/interfaceDetectors/index.js";
 
+const LANGUAGE_BY_EXTENSION = new Map([
+    [".js", "javascript"],
+    [".mjs", "javascript"],
+    [".cjs", "javascript"],
+    [".ts", "typescript"],
+    [".tsx", "typescript"],
+    [".py", "python"],
+    [".java", "java"],
+    [".cs", "csharp"],
+    [".go", "go"],
+    [".php", "php"],
+    [".rb", "ruby"],
+    [".rs", "rust"],
+    [".kt", "kotlin"],
+    [".kts", "kotlin"],
+    [".swift", "swift"],
+    [".dart", "dart"],
+    [".scala", "scala"],
+    [".sc", "scala"],
+    [".ex", "elixir"],
+    [".exs", "elixir"],
+]);
+
 function detectLanguage(filePath) {
     const extension = path.extname(filePath).toLowerCase();
 
-    if (extension === ".js" || extension === ".mjs" || extension === ".cjs") {
-        return "javascript";
-    }
+    return LANGUAGE_BY_EXTENSION.get(extension) || null;
+}
 
-    if (extension === ".ts" || extension === ".tsx") {
-        return "typescript";
-    }
-
-    if (extension === ".py") {
-        return "python";
-    }
-
-    if (extension === ".java") {
-        return "java";
-    }
-
-    if (extension === ".cs") {
-        return "csharp";
-    }
-
-    if (extension === ".go") {
-        return "go";
-    }
-
-    if (extension === ".rb") {
-        return "ruby";
-    }
-
-    if (extension === ".php") {
-        return "php";
-    }
-
-    if (extension === ".rs") {
-        return "rust";
-    }
-
-    return null;
+function createInterfaceKey(item, language, file) {
+    return JSON.stringify({
+        type: item.type,
+        protocol: item.protocol,
+        framework: item.framework,
+        role: item.role,
+        method: item.method || "",
+        path: item.path || "",
+        event: item.event || "",
+        language,
+        file,
+    });
 }
 
 export function registerDiscoverInterfacesTool(server) {
@@ -72,6 +73,7 @@ export function registerDiscoverInterfacesTool(server) {
                 );
 
                 const interfaces = [];
+                const seenInterfaces = new Set();
 
                 for (const file of files) {
                     const language = detectLanguage(file);
@@ -93,6 +95,18 @@ export function registerDiscoverInterfacesTool(server) {
                                 await detector.detect(absolutePath);
 
                             for (const item of detected) {
+                                const key = createInterfaceKey(
+                                    item,
+                                    language,
+                                    file
+                                );
+
+                                if (seenInterfaces.has(key)) {
+                                    continue;
+                                }
+
+                                seenInterfaces.add(key);
+
                                 interfaces.push({
                                     ...item,
                                     language,
@@ -100,7 +114,6 @@ export function registerDiscoverInterfacesTool(server) {
                                 });
                             }
                         } catch {
-                            // Detector failures should not stop other detectors.
                         }
                     }
                 }
