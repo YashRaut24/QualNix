@@ -182,21 +182,24 @@ function extractSocketHandlers(content) {
         const event = match[1];
         const start = match.index;
 
-        const callbackStart = pattern.lastIndex;
+        const callbackStart =
+            pattern.lastIndex;
 
-        const arrowIndex = content.indexOf(
-            "=>",
-            callbackStart
-        );
+        const arrowIndex =
+            content.indexOf(
+                "=>",
+                callbackStart
+            );
 
         if (arrowIndex === -1) {
             continue;
         }
 
-        const openingBrace = content.indexOf(
-            "{",
-            arrowIndex
-        );
+        const openingBrace =
+            content.indexOf(
+                "{",
+                arrowIndex
+            );
 
         if (openingBrace === -1) {
             continue;
@@ -212,17 +215,37 @@ function extractSocketHandlers(content) {
             continue;
         }
 
+        const line =
+            content
+                .slice(0, start)
+                .split("\n")
+                .length;
+
+        const endLine =
+            content
+                .slice(0, closingBrace)
+                .split("\n")
+                .length;
+
         handlers.push({
             event,
-            body: content.slice(
-                openingBrace,
-                closingBrace + 1
-            ),
+
+            body:
+                content.slice(
+                    openingBrace,
+                    closingBrace + 1
+                ),
+
             start,
-            line:
-                content
-                    .slice(0, start)
-                    .split("\n").length,
+
+            line,
+
+            scope: {
+                name: "<anonymous>",
+                type: "callback",
+                startLine: line,
+                endLine,
+            },
         });
 
         pattern.lastIndex =
@@ -231,6 +254,7 @@ function extractSocketHandlers(content) {
 
     return handlers;
 }
+
 function extractSocketEmits(content) {
     const events = [];
 
@@ -246,6 +270,108 @@ function extractSocketEmits(content) {
 
     return events;
 }
+
+function findScopeEnd(source, startIndex) {
+    let braceDepth = 0;
+    let started = false;
+    let quote = null;
+    let escaped = false;
+
+    for (let index = startIndex; index < source.length; index++) {
+        const character = source[index];
+
+        if (quote) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (character === "\\") {
+                escaped = true;
+                continue;
+            }
+
+            if (character === quote) {
+                quote = null;
+            }
+
+            continue;
+        }
+
+        if (
+            character === "\"" ||
+            character === "'" ||
+            character === "`"
+        ) {
+            quote = character;
+            continue;
+        }
+
+        if (character === "{") {
+            braceDepth++;
+            started = true;
+            continue;
+        }
+
+        if (character === "}") {
+            braceDepth--;
+
+            if (started && braceDepth === 0) {
+                return index;
+            }
+        }
+    }
+
+    return source.length - 1;
+}
+
+function lineNumberAt(source, index) {
+    return (
+        source.slice(0, index).split("\n").length
+    );
+}
+
+function resolveHandlerScope(
+    source,
+    handlerStart
+) {
+    if (
+        handlerStart === null ||
+        handlerStart === undefined
+    ) {
+        return null;
+    }
+
+    const braceStart =
+        source.indexOf(
+            "{",
+            handlerStart
+        );
+
+    if (braceStart === -1) {
+        return null;
+    }
+
+    const braceEnd =
+        findScopeEnd(
+            source,
+            braceStart
+        );
+
+    return {
+        startLine:
+            lineNumberAt(
+                source,
+                handlerStart
+            ),
+
+        endLine:
+            lineNumberAt(
+                source,
+                braceEnd
+            ),
+    };
+}   
 
 function extractDatabaseOperations(content) {
     const operations = [];
@@ -322,18 +448,26 @@ function mapSocketInterface(
     );
 
     if (handler) {
-        return {
-            handler: `socket.on("${handler.event}")`,
-            line: handler.line,
-            databaseOperations:
-                extractDatabaseOperations(
-                    handler.body
-                ),
-            emittedEvents:
-                extractSocketEmits(
-                    handler.body
-                ),
-        };
+    return {
+        handler:
+            `socket.on("${handler.event}")`,
+
+        line:
+            handler.line,
+
+        scope:
+            handler.scope,
+
+        databaseOperations:
+            extractDatabaseOperations(
+                handler.body
+            ),
+
+        emittedEvents:
+            extractSocketEmits(
+                handler.body
+            ),
+    };
     }
 
     const emitPatterns = [
@@ -368,25 +502,36 @@ function mapSocketInterface(
                 )
             );
 
-        return {
-            handler: null,
-            line: null,
-            sourceHandler:
-                sourceHandler
-                    ? `socket.on("${sourceHandler.event}")`
-                    : null,
-            sourceLine:
-                sourceHandler
-                    ? sourceHandler.line
-                    : null,
-            databaseOperations:
-                sourceHandler
-                    ? extractDatabaseOperations(
-                          sourceHandler.body
-                      )
-                    : [],
-            emittedEvents: emitted,
-        };
+     return {
+        handler: null,
+
+        line: null,
+
+        sourceHandler:
+            sourceHandler
+                ? `socket.on("${sourceHandler.event}")`
+                : null,
+
+        sourceLine:
+            sourceHandler
+                ? sourceHandler.line
+                : null,
+
+        sourceScope:
+            sourceHandler
+                ? sourceHandler.scope
+                : null,
+
+        databaseOperations:
+            sourceHandler
+                ? extractDatabaseOperations(
+                    sourceHandler.body
+                )
+                : [],
+
+        emittedEvents:
+            emitted,
+    };
     }
 
     return {
@@ -530,6 +675,29 @@ async function mapInterface(
     };
 }
 
+export async function collectInterfaceMappings(
+    files,
+    projectRoot
+) {
+    const interfaces =
+        await discoverAllInterfaces(
+            files,
+            projectRoot
+        );
+
+    const mappings = [];
+
+    for (const interfaceItem of interfaces) {
+        mappings.push(
+            await mapInterface(
+                interfaceItem
+            )
+        );
+    }
+
+    return mappings;
+}
+
 export function registerMapInterfacesTool(
     server
 ) {
@@ -567,23 +735,11 @@ export function registerMapInterfacesTool(
                         projectRoot
                     );
 
-                const interfaces =
-                    await discoverAllInterfaces(
+                const mappings =
+                    await collectInterfaceMappings(
                         files,
                         projectRoot
-                    );
-
-                const mappings = [];
-
-                for (
-                    const interfaceItem of interfaces
-                ) {
-                    mappings.push(
-                        await mapInterface(
-                            interfaceItem
-                        )
-                    );
-                }
+                );
 
                 return {
                     content: [
