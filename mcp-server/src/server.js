@@ -9,6 +9,7 @@ import { registerFileInfoTool } from "./tools/fileInfo.js";
 import { registerScanProjectTool } from "./tools/scanProject.js";
 import { registerDetectProjectTool } from "./tools/detectProject.js";
 import { registerDiscoverInterfacesTool } from "./tools/discoverInterfaces.js";
+import { registerMapInterfacesTool } from "./tools/mapInterfaces.js";
 
 export async function createServer(){
     const server = new McpServer({
@@ -25,6 +26,7 @@ export async function createServer(){
     registerScanProjectTool(server);
     registerDetectProjectTool(server);
     registerDiscoverInterfacesTool(server);
+    registerMapInterfacesTool(server);
 
     const transport = new StdioServerTransport();
 
