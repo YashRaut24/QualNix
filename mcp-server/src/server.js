@@ -10,6 +10,7 @@ import { registerScanProjectTool } from "./tools/scanProject.js";
 import { registerDetectProjectTool } from "./tools/detectProject.js";
 import { registerDiscoverInterfacesTool } from "./tools/discoverInterfaces.js";
 import { registerMapInterfacesTool } from "./tools/mapInterfaces.js";
+import { registerAnalyzeDataFlowTool } from "./tools/analyzeDataFlow.js";
 
 export async function createServer(){
     const server = new McpServer({
@@ -27,6 +28,7 @@ export async function createServer(){
     registerDetectProjectTool(server);
     registerDiscoverInterfacesTool(server);
     registerMapInterfacesTool(server);
+    registerAnalyzeDataFlowTool(server);
 
     const transport = new StdioServerTransport();
 

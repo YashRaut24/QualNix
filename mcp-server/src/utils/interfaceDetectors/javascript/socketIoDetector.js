@@ -35,13 +35,26 @@ function collectMatches(content, pattern) {
     return matches;
 }
 
+function collectUniqueEvents(content, pattern) {
+    return [
+        ...new Set(
+            collectMatches(content, pattern)
+        ),
+    ];
+}
+
 export async function detectSocketIoEvents(filePath) {
-    const content = await fs.readFile(filePath, "utf-8");
+    const content = await fs.readFile(
+        filePath,
+        "utf-8"
+    );
 
     const isServer =
         SERVER_CONNECTION_PATTERN.test(content) ||
-        (SOCKET_IO_SERVER_PATTERN.test(content) &&
-            SOCKET_IO_SERVER_IMPORT_PATTERN.test(content));
+        (
+            SOCKET_IO_SERVER_PATTERN.test(content) &&
+            SOCKET_IO_SERVER_IMPORT_PATTERN.test(content)
+        );
 
     const isClient =
         SOCKET_IO_CLIENT_IMPORT_PATTERN.test(content) &&
@@ -51,47 +64,78 @@ export async function detectSocketIoEvents(filePath) {
         return [];
     }
 
-    let role = "unknown";
-
-    if (isServer && !isClient) {
-        role = "server";
-    } else if (isClient && !isServer) {
-        role = "client";
-    }
-
     const interfaces = [];
 
-    const socketEvents = collectMatches(
-        content,
-        SOCKET_ON_PATTERN
-    );
+    if (isServer) {
+        const serverHandlers =
+            collectUniqueEvents(
+                content,
+                SOCKET_ON_PATTERN
+            );
 
-    const socketEmits = collectMatches(
-        content,
-        SOCKET_EMIT_PATTERN
-    );
+        for (const event of serverHandlers) {
+            interfaces.push({
+                type: "realtime",
+                protocol: "socketio",
+                framework: "Socket.IO",
+                role: "server",
+                direction: "incoming",
+                event,
+            });
+        }
 
-    const ioEmits = collectMatches(
-        content,
-        IO_EMIT_PATTERN
-    );
+        const serverEmits =
+            collectUniqueEvents(
+                content,
+                IO_EMIT_PATTERN
+            );
 
-    const events = [
-        ...socketEvents,
-        ...socketEmits,
-        ...ioEmits,
-    ];
+        for (const event of serverEmits) {
+            interfaces.push({
+                type: "realtime",
+                protocol: "socketio",
+                framework: "Socket.IO",
+                role: "server",
+                direction: "outgoing",
+                event,
+            });
+        }
+    }
 
-    const uniqueEvents = [...new Set(events)];
+    if (isClient) {
+        const clientEmits =
+            collectUniqueEvents(
+                content,
+                SOCKET_EMIT_PATTERN
+            );
 
-    for (const event of uniqueEvents) {
-        interfaces.push({
-            type: "realtime",
-            protocol: "socketio",
-            framework: "Socket.IO",
-            role,
-            event,
-        });
+        for (const event of clientEmits) {
+            interfaces.push({
+                type: "realtime",
+                protocol: "socketio",
+                framework: "Socket.IO",
+                role: "client",
+                direction: "outgoing",
+                event,
+            });
+        }
+
+        const clientListeners =
+            collectUniqueEvents(
+                content,
+                SOCKET_ON_PATTERN
+            );
+
+        for (const event of clientListeners) {
+            interfaces.push({
+                type: "realtime",
+                protocol: "socketio",
+                framework: "Socket.IO",
+                role: "client",
+                direction: "incoming",
+                event,
+            });
+        }
     }
 
     return interfaces;
