@@ -6,8 +6,8 @@ const SOCKET_ON_PATTERN =
 const SOCKET_EMIT_PATTERN =
     /\bsocket\.emit\s*\(\s*["'`]([^"'`]+)["'`]/gi;
 
-const IO_EMIT_PATTERN =
-    /\bio(?:\.[a-zA-Z_$][\w$]*)*\.emit\s*\(\s*["'`]([^"'`]+)["'`]/gi;
+const SERVER_EMIT_PATTERN =
+    /\b(?:io|socket)(?:\.[a-zA-Z_$][\w$]*)*\.emit\s*\(\s*["'`]([^"'`]+)["'`]/gi;
 
 const SERVER_CONNECTION_PATTERN =
     /\bio\.on\s*\(\s*["'`]connection["'`]\s*,/i;
@@ -56,9 +56,19 @@ export async function detectSocketIoEvents(filePath) {
             SOCKET_IO_SERVER_IMPORT_PATTERN.test(content)
         );
 
+    const hasClientSocketUsage =
+    SOCKET_EMIT_PATTERN.test(content) ||
+    SOCKET_ON_PATTERN.test(content);
+
     const isClient =
-        SOCKET_IO_CLIENT_IMPORT_PATTERN.test(content) &&
-        SOCKET_IO_CLIENT_FACTORY_PATTERN.test(content);
+        !isServer &&
+        (
+            (
+                SOCKET_IO_CLIENT_IMPORT_PATTERN.test(content) &&
+                SOCKET_IO_CLIENT_FACTORY_PATTERN.test(content)
+            ) ||
+            hasClientSocketUsage
+        );
 
     if (!isServer && !isClient) {
         return [];
@@ -87,7 +97,7 @@ export async function detectSocketIoEvents(filePath) {
         const serverEmits =
             collectUniqueEvents(
                 content,
-                IO_EMIT_PATTERN
+                SERVER_EMIT_PATTERN
             );
 
         for (const event of serverEmits) {
