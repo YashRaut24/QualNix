@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { resolveProjectPath } from "./pathUtils.js";
 import { scanProjectDirectory } from "./projectScanner.js";
+import { setProjectRoot } from "../context/projectContext.js";
 
 const LANGUAGE_BY_EXTENSION = new Map([
     [".js", "javascript"],
@@ -59,7 +60,11 @@ export function isClientFile(file, content) {
         return true;
     }
     if (
-        /(?:from\s*["']react["']|from\s*["']vue["']|from\s*["']svelte["']|from\s*["']@angular|["']socket\.io-client["'])/i.test(content)
+        /(?:from\s*["']react["']|from\s*["']vue["']|from\s*["']svelte["']|from\s*["']@angular|["']socket\.io-client["'])/i.test(content) ||
+        /(?:package:flutter|StatefulWidget|StatelessWidget|package:http|web_socket_channel)/i.test(content) ||
+        /(?:import\s+SwiftUI|import\s+UIKit|URLSession\.shared|webSocketTask)/i.test(content) ||
+        /(?:androidx\.compose|android\.app|io\.ktor\.client)/i.test(content) ||
+        /(?:import\s+requests|import\s+httpx|import\s+aiohttp)/i.test(content)
     ) {
         return true;
     }
@@ -78,14 +83,28 @@ export function isServerFile(file, content) {
         normalizedPath.includes("/routes/") ||
         normalizedPath.includes("/sockets/") ||
         normalizedPath.includes("/services/") ||
-        normalizedPath.includes("/models/")
+        normalizedPath.includes("/models/") ||
+        normalizedPath.includes("/handlers/") ||
+        normalizedPath.includes("/channels/") ||
+        normalizedPath.includes("/routers/")
     ) {
         return true;
     }
     if (
         /(?:from\s*["']express["']|from\s*["']fastify["']|from\s*["']@nestjs|from\s*["']socket\.io["']|from\s*["']koa["']|require\s*\(\s*["'](?:express|fastify|socket\.io|koa)["']\))/i.test(content) ||
         /\bio\.on\s*\(\s*["']connection["']/.test(content) ||
-        /\bnew\s+Server\s*\(/.test(content)
+        /\bnew\s+Server\s*\(/.test(content) ||
+        /(?:from\s+flask|from\s+fastapi|import\s+django|from\s+django|flask_socketio)/i.test(content) ||
+        /(?:org\.springframework|@RestController|@Controller|io\.ktor\.server)/i.test(content) ||
+        /(?:Microsoft\.AspNetCore|\[ApiController\]|\bHub\b|ControllerBase)/i.test(content) ||
+        /(?:github\.com\/gin-gonic|fiber|echo|chi|gorilla\/websocket)/i.test(content) ||
+        /(?:Illuminate\\Support\\Facades\\Route|\bRoute::|Symfony\\Component|Slim\\App)/i.test(content) ||
+        /(?:Rails\.application|ActionController|Sinatra::Base|ActionCable)/i.test(content) ||
+        /(?:actix_web|axum|rocket::|warp::|tonic::)/i.test(content) ||
+        /(?:import\s+Vapor|RoutesBuilder|Vapor\.Application)/i.test(content) ||
+        /(?:package:shelf|dart_frog)/i.test(content) ||
+        /(?:play\.api|akka\.http|org\.http4s)/i.test(content) ||
+        /(?:Phoenix\.Router|Phoenix\.Controller|Phoenix\.Channel|Phoenix\.Socket)/i.test(content)
     ) {
         return true;
     }
@@ -210,24 +229,134 @@ function findPythonScopeEnd(content, defIndex) {
     return defIndex + totalLength;
 }
 
-const DATABASE_PATTERNS = [
-    /\b([A-Z][A-Za-z0-9_$]*)\.(find|findOne|findById|findByIdAndUpdate|findByIdAndDelete|create|insertMany|updateOne|updateMany|deleteOne|deleteMany|save|destroy|upsert|countDocuments|aggregate)\s*\(/g,
-    /\bprisma\.([a-zA-Z0-9_$]+)\.(findMany|findUnique|findFirst|create|createMany|update|updateMany|delete|deleteMany|upsert|count|aggregate)\s*\(/g,
-    /\b([A-Z][A-Za-z0-9_]*)\.objects\.(create|get|filter|all|update|delete|bulk_create)\s*\(/g,
-    /\b([A-Z][A-Za-z0-9_]*)\.query\.(filter|get|all|first|filter_by)\s*\(/g,
-    /\b([a-zA-Z0-9_$]*(?:Repository|Repo|Dao|Service))\.(save|saveAll|insert|create|delete|deleteById|findById|findAll)\s*\(/g,
-    /\b(?:context|_context|dbContext)\.([A-Z][A-Za-z0-9_]*)\.(Add|AddRange|Remove|RemoveRange|Update|Find|FirstOrDefault)\s*\(/g,
-    /\b(?:db|database|connection|pool|session)\.(query|execute|run|prepare|insertOne|insertMany|updateOne|updateMany|deleteOne|deleteMany|find)\s*\(/gi,
-    /\b(?:session|db\.session)\.(add|commit|delete|rollback)\s*\(/gi,
+function findRubyOrElixirScopeEnd(content, startIndex) {
+    const lines = content.slice(startIndex).split("\n");
+    let depth = 0;
+    let totalLength = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        if (
+            /\b(?:def|do|class|module|if|unless|case|begin)\b/.test(trimmed) &&
+            !trimmed.startsWith("#")
+        ) {
+            depth++;
+        }
+
+        if (/\bend\b/.test(trimmed) && !trimmed.startsWith("#")) {
+            depth--;
+            if (depth <= 0) {
+                totalLength += line.length;
+                return startIndex + totalLength;
+            }
+        }
+
+        totalLength += line.length + 1;
+    }
+
+    return startIndex + totalLength;
+}
+
+const DATABASE_EXTRACTORS = [
+    // Standard Object.operation(..) e.g. Card.create(..), User.findById(..)
+    {
+        pattern: /\b([A-Z][A-Za-z0-9_$]*)\.(find|findOne|findById|findByIdAndUpdate|findByIdAndDelete|create|insertMany|updateOne|updateMany|deleteOne|deleteMany|save|destroy|upsert|countDocuments|aggregate|all|where|first|delete|insert)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Prisma: prisma.column.updateMany(..)
+    {
+        pattern: /\bprisma\.([a-zA-Z0-9_$]+)\.(findMany|findUnique|findFirst|create|createMany|update|updateMany|delete|deleteMany|upsert|count|aggregate)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Django ORM: Task.objects.create(..) or Task.objects.filter(..).update(..)
+    {
+        pattern: /\b([A-Z][A-Za-z0-9_]*)\.objects(?:\.[a-zA-Z0-9_]+\([^)]*\))*\.(create|update|delete|bulk_create|get|filter|all)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // SQLAlchemy: Task.query.filter(..)
+    {
+        pattern: /\b([A-Z][A-Za-z0-9_]*)\.query(?:\.[a-zA-Z0-9_]+\([^)]*\))*\.(filter|get|all|first|filter_by|update|delete)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Spring Repository / Dao: orderRepository.save(..)
+    {
+        pattern: /\b([a-zA-Z0-9_$]*(?:Repository|Repo|Dao|Service))\.(save|saveAll|saveAndFlush|insert|create|delete|deleteById|findById|findAll|getOne)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // EF Core: _context.Messages.Add(..)
+    {
+        pattern: /\b(?:context|_context|dbContext)\.([A-Z][A-Za-z0-9_]*)\.(Add|AddRange|Remove|RemoveRange|Update|Find|FirstOrDefault|ToListAsync|SaveChanges|SaveChangesAsync)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Go GORM: db.Create(&product), db.Find(&products)
+    {
+        pattern: /\bdb\.(Create|Save|Delete|Find|First|Where|Take)\s*\(\s*&?([A-Za-z0-9_]+)/gi,
+        extract: (m) => ({ model: m[2], operation: m[1] }),
+    },
+    // PHP Eloquent: Invoice::create(..)
+    {
+        pattern: /\b([A-Z][A-Za-z0-9_]*)::(create|find|findOrFail|where|all|destroy)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Elixir Ecto: Repo.insert(%Alert{..})
+    {
+        pattern: /\bRepo\.(insert|insert!|update|update!|delete|delete!|get|get!|all|one)\s*\(\s*(?:%?([A-Z][A-Za-z0-9_]*)|[A-Za-z0-9_]+)/g,
+        extract: (m) => ({ model: m[2] || "Database", operation: m[1] }),
+    },
+    // Rust Diesel: diesel::insert_into(items::table)
+    {
+        pattern: /\bdiesel::(insert_into|delete|update)\s*\(\s*([a-zA-Z0-9_]+)/g,
+        extract: (m) => ({ model: m[2], operation: m[1] }),
+    },
+    // Swift Fluent: Card.query(on: req.db)
+    {
+        pattern: /\b([A-Z][A-Za-z0-9_]*)\.(query|find|create|save|delete)\s*\(\s*on:\s*(?:req|request)\.db\s*\)/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Dart Supabase: supabase.from('posts').insert(..)
+    {
+        pattern: /\bsupabase\.from\s*\(\s*["']([a-zA-Z0-9_]+)["']\s*\)\.(insert|select|update|delete|upsert)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Dart Drift: into(posts).insert(..)
+    {
+        pattern: /\binto\s*\(\s*([a-zA-Z0-9_]+)\s*\)\.(insert|insertOnConflictUpdate)\s*\(/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Kotlin Exposed: Cards.insert { .. }
+    {
+        pattern: /\b([A-Z][A-Za-z0-9_]*)\.(insert|select|update|deleteWhere)\s*\{/g,
+        extract: (m) => ({ model: m[1], operation: m[2] }),
+    },
+    // Generic db/session query fallback
+    {
+        pattern: /\b(?:database|connection|pool)\.(query|execute|run|prepare|insertOne|insertMany|updateOne|updateMany|deleteOne|deleteMany|find)\s*\(/gi,
+        extract: (m) => ({ model: "Database", operation: m[1] }),
+    },
+    {
+        pattern: /\bdb\.(query|execute|run|prepare|raw|exec|queryRow)\s*\(/gi,
+        extract: (m) => ({ model: "Database", operation: m[1] }),
+    },
+    {
+        pattern: /\b(?:session|db\.session)\.(add|commit|delete|rollback)\s*\(/gi,
+        extract: (m) => ({ model: "Database", operation: m[1] }),
+    },
 ];
 
 function normalizeModelName(rawName) {
     if (!rawName) return null;
     let name = rawName.trim();
+    if (name.startsWith("%")) {
+        name = name.slice(1);
+    }
     if (name.endsWith("Repository")) {
         name = name.slice(0, -10);
     } else if (name.endsWith("Repo")) {
         name = name.slice(0, -4);
+    } else if (name.endsWith("Dao")) {
+        name = name.slice(0, -3);
     }
     if (name.length > 0) {
         name = name.charAt(0).toUpperCase() + name.slice(1);
@@ -244,10 +373,10 @@ function normalizeDbOperation(rawOp) {
     if (op.includes("update") || op.includes("upsert") || op.includes("modify")) {
         return "update";
     }
-    if (op.includes("save") || op.includes("add") || op.includes("insert") || op.includes("create") || op.includes("bulk_create")) {
+    if (op.includes("save") || op.includes("add") || op.includes("insert") || op.includes("create") || op.includes("bulk_create") || op.includes("persist")) {
         return "create";
     }
-    if (op.includes("find") || op.includes("get") || op.includes("first") || op.includes("filter") || op.includes("all") || op.includes("query") || op.includes("count") || op.includes("read")) {
+    if (op.includes("find") || op.includes("get") || op.includes("first") || op.includes("filter") || op.includes("all") || op.includes("query") || op.includes("count") || op.includes("read") || op.includes("select") || op.includes("one")) {
         return "find";
     }
     return op;
@@ -258,20 +387,13 @@ export function extractDatabaseOperations(bodyContent) {
     const operations = [];
     const seen = new Set();
 
-    for (const regex of DATABASE_PATTERNS) {
-        regex.lastIndex = 0;
+    for (const extractor of DATABASE_EXTRACTORS) {
+        extractor.pattern.lastIndex = 0;
         let match;
-        while ((match = regex.exec(bodyContent)) !== null) {
-            let model = null;
-            let operation = null;
-
-            if (match.length >= 3) {
-                model = normalizeModelName(match[1]);
-                operation = normalizeDbOperation(match[2]);
-            } else if (match.length === 2) {
-                model = "Database";
-                operation = normalizeDbOperation(match[1]);
-            }
+        while ((match = extractor.pattern.exec(bodyContent)) !== null) {
+            const raw = extractor.extract(match);
+            const model = normalizeModelName(raw.model);
+            const operation = normalizeDbOperation(raw.operation);
 
             if (model && operation) {
                 const key = `${model}:${operation}`;
@@ -290,11 +412,32 @@ export function extractDatabaseOperations(bodyContent) {
 }
 
 const SERVER_EMIT_PATTERNS = [
+    // JS/TS Socket.IO & WebSocket & Python emit
     /\b(?:socket|io|this\.server|server|ns|nsp|room)(?:\.[a-zA-Z0-9_$]+)*\.(?:emit|send)\s*\(\s*["'`]([^"'`]+)["'`]/gi,
-    /\bClients\.(?:All|Others|Group|Caller|Client|User)\.SendAsync\s*\(\s*(?:@?\$?|\$?@?)["']([^"'`]+)["']/gi,
     /\bemit\s*\(\s*["'`]([^"'`]+)["'`]/gi,
     /\b(?:ws|conn|client|socket)\.send\s*\(\s*["'`]([^"'`]+)["'`]/gi,
-    /\b(?:ws|conn|client|socket)\.send\s*\(\s*JSON\.stringify\s*\(\s*\{[^}]*?(?:type|event)\s*:\s*["'`]([^"'`]+)["'`]/gi,
+    /\b(?:ws|conn|client|socket)\.send\s*\(\s*JSON\.stringify\s*\(\s*\{[^}]*?(?:type|event|action)\s*:\s*["'`]([^"'`]+)["'`]/gi,
+    // C# SignalR
+    /\bClients\.(?:All|Others|Group|Caller|Client|User)\.SendAsync\s*\(\s*(?:@?\$?|\$?@?)["']([^"'`]+)["']/gi,
+    // Go WebSocket: ws.WriteJSON, conn.WriteJSON, conn.WriteMessage
+    /\b(?:ws|conn)\.WriteJSON\s*\(\s*(?:map\[string\]interface\{\}\s*\{[^}]*?["'](?:event|type|action)["']\s*:\s*["']([^"']+)["']|[a-zA-Z0-9_]*\{\s*(?:Event|Type|Action)\s*:\s*["']([^"']+)["'])/gi,
+    /\b(?:ws|conn)\.WriteJSON\s*\(\s*["'`]([^"'`]+)["'`]/gi,
+    // Elixir Phoenix: broadcast!, broadcast, push, Endpoint.broadcast
+    /\b(?:broadcast!|broadcast|push)\s*\(\s*(?:socket|[a-zA-Z0-9_]+)\s*,\s*["']([^"']+)["']/gi,
+    /\bEndpoint\.broadcast\s*\(\s*["'][^"']+["']\s*,\s*["']([^"']+)["']/gi,
+    // Ruby ActionCable: ActionCable.server.broadcast("channel", "event" or { event: "event" })
+    /\bActionCable\.server\.broadcast\s*\(\s*["'][^"']+["']\s*,\s*(?:\{[^}]*?event:\s*["']([^"']+)["']|["']([^"']+)["'])/gi,
+    /\bbroadcast_to\s*\(\s*[^,]+\s*,\s*(?:\{[^}]*?event:\s*["']([^"']+)["']|["']([^"']+)["'])/gi,
+    // PHP Laravel: broadcast(new EventName(...)) or event(new EventName(...))
+    /\b(?:broadcast|event)\s*\(\s*new\s+([A-Za-z0-9_]+)\s*\(/gi,
+    // Java / Kotlin Spring WebSocket: messagingTemplate.convertAndSend("/topic/cards", ...)
+    /\b(?:messagingTemplate|simpMessagingTemplate)\.convertAndSend\s*\(\s*["']([^"']+)["']/gi,
+    // Swift Vapor: ws.send("event")
+    /\bws\.send\s*\(\s*["']([^"']+)["']/gi,
+    // Kotlin Ktor: send(Frame.Text("event"))
+    /\bsend\s*\(\s*Frame\.Text\s*\(\s*["']([^"']+)["']/gi,
+    // Rust WebSocket / broadcast channel: tx.send("event")
+    /\b(?:tx|session)\.(?:send|text)\s*\(\s*["']([^"']+)["']/gi,
 ];
 
 export function extractServerEmits(bodyContent) {
@@ -306,7 +449,7 @@ export function extractServerEmits(bodyContent) {
         regex.lastIndex = 0;
         let match;
         while ((match = regex.exec(bodyContent)) !== null) {
-            const eventName = match[1];
+            const eventName = match[1] || match[2] || match[3];
             if (eventName && !seen.has(eventName)) {
                 seen.add(eventName);
                 events.push(eventName);
@@ -318,6 +461,7 @@ export function extractServerEmits(bodyContent) {
 }
 
 const CLIENT_TRIGGER_PATTERNS = [
+    // Realtime - Socket.IO (JS, TS, Python, Dart, Swift)
     {
         type: "realtime",
         protocol: "socketio",
@@ -330,11 +474,12 @@ const CLIENT_TRIGGER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // Realtime - WebSocket (JS, TS, Go, Python, Swift, Dart, Kotlin)
     {
         type: "realtime",
         protocol: "websocket",
         framework: "WebSocket",
-        pattern: /\b(?:ws|socket|client)\.send\s*\(\s*(?:JSON\.stringify\s*\(\s*\{[^}]*?(?:type|event|action)\s*:\s*)?["'`]([^"'`]+)["'`]/g,
+        pattern: /\b(?:ws|socket|client|channel\.sink|conn)\.(?:send|add|WriteJSON)\s*\(\s*(?:JSON\.stringify\s*\(\s*\{[^}]*?(?:type|event|action)\s*:\s*)?["'`]([^"'`]+)["'`]/g,
         extract: (match, content, file) => ({
             event: match[1],
             direction: "outgoing",
@@ -342,11 +487,12 @@ const CLIENT_TRIGGER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // Realtime - SignalR (JS, TS, C#)
     {
         type: "realtime",
         protocol: "signalr",
         framework: "SignalR",
-        pattern: /\b(?:connection|hubConnection)\.(?:invoke|send)\s*\(\s*["'`]([^"'`]+)["'`]/g,
+        pattern: /\b(?:connection|hubConnection)\.(?:invoke|send|InvokeAsync|SendAsync)\s*\(\s*["'`]([^"'`]+)["'`]/g,
         extract: (match, content, file) => ({
             event: match[1],
             direction: "outgoing",
@@ -354,6 +500,20 @@ const CLIENT_TRIGGER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // Realtime - Phoenix Channel (JS / Elixir client)
+    {
+        type: "realtime",
+        protocol: "phoenix",
+        framework: "Phoenix Channels",
+        pattern: /\bchannel\.push\s*\(\s*["'`]([^"'`]+)["'`]/g,
+        extract: (match, content, file) => ({
+            event: match[1],
+            direction: "outgoing",
+            file,
+            line: findLineNumber(content, match.index),
+        }),
+    },
+    // HTTP - Fetch (JS / TS)
     {
         type: "http",
         protocol: "rest",
@@ -367,11 +527,12 @@ const CLIENT_TRIGGER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // HTTP - Axios / Http Client (JS, TS, Python, Dart, Kotlin, Swift, Go, C#, PHP, Ruby)
     {
         type: "http",
         protocol: "rest",
-        framework: "Axios",
-        pattern: /\b(?:axios|api|client|httpClient|http)\.(get|post|put|patch|delete|head|options)\s*\(\s*["'`]([^"'`]+)["'`]/gi,
+        framework: "HTTP Client",
+        pattern: /\b(?:axios|api|client|httpClient|http|requests|httpx|aiohttp|dio|Dio\(\)|Faraday|HTTParty|Http)\.(get|post|put|patch|delete|head|options)\s*\(\s*(?:Uri\.parse\s*\(\s*)?["'`]([^"'`]+)["'`]/gi,
         extract: (match, content, file) => ({
             path: match[2],
             method: match[1].toUpperCase(),
@@ -380,6 +541,49 @@ const CLIENT_TRIGGER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // HTTP - C# HttpClient (httpClient.PostAsync("url", ...))
+    {
+        type: "http",
+        protocol: "rest",
+        framework: "HttpClient",
+        pattern: /\b(?:httpClient|client)\.(GetAsync|PostAsync|PutAsync|DeleteAsync|PatchAsync)\s*\(\s*["'`]([^"'`]+)["'`]/g,
+        extract: (match, content, file) => ({
+            path: match[2],
+            method: match[1].replace("Async", "").toUpperCase(),
+            direction: "outgoing",
+            file,
+            line: findLineNumber(content, match.index),
+        }),
+    },
+    // HTTP - Swift URLSession / URLRequest
+    {
+        type: "http",
+        protocol: "rest",
+        framework: "URLSession",
+        pattern: /URLRequest\s*\(\s*url:\s*URL\s*\(\s*string:\s*["']([^"']+)["']\s*\)!\s*\)[\s\S]*?\.httpMethod\s*=\s*["'](GET|POST|PUT|PATCH|DELETE)["']/gi,
+        extract: (match, content, file) => ({
+            path: match[1],
+            method: match[2].toUpperCase(),
+            direction: "outgoing",
+            file,
+            line: findLineNumber(content, match.index),
+        }),
+    },
+    // HTTP - Go http.Post / http.Get
+    {
+        type: "http",
+        protocol: "rest",
+        framework: "Go HTTP",
+        pattern: /\bhttp\.(Get|Post|Head)\s*\(\s*["'`]([^"'`]+)["'`]/g,
+        extract: (match, content, file) => ({
+            path: match[2],
+            method: match[1].toUpperCase(),
+            direction: "outgoing",
+            file,
+            line: findLineNumber(content, match.index),
+        }),
+    },
+    // GraphQL (JS / TS / Dart / Swift)
     {
         type: "http",
         protocol: "graphql",
@@ -393,6 +597,7 @@ const CLIENT_TRIGGER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // gRPC (JS, Python, Java, C#, Go, Rust)
     {
         type: "rpc",
         protocol: "grpc",
@@ -408,11 +613,12 @@ const CLIENT_TRIGGER_PATTERNS = [
 ];
 
 const CLIENT_LISTENER_PATTERNS = [
+    // Socket.IO (JS, TS, Python, Dart)
     {
         type: "realtime",
         protocol: "socketio",
         framework: "Socket.IO",
-        pattern: /\bsocket\.on\s*\(\s*["'`]([^"'`]+)["'`]/g,
+        pattern: /@?(?:socket|sio|client)\.on\s*\(\s*["'`]([^"'`]+)["'`]/g,
         extract: (match, content, file) => ({
             event: match[1],
             direction: "incoming",
@@ -420,11 +626,12 @@ const CLIENT_LISTENER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // SignalR (JS, TS, C#)
     {
         type: "realtime",
         protocol: "signalr",
         framework: "SignalR",
-        pattern: /\b(?:connection|hubConnection)\.on\s*\(\s*["'`]([^"'`]+)["'`]/g,
+        pattern: /\b(?:connection|hubConnection)\.(?:on|On)\s*(?:<[^>]+>)?\s*\(\s*["'`]([^"'`]+)["'`]/g,
         extract: (match, content, file) => ({
             event: match[1],
             direction: "incoming",
@@ -432,6 +639,7 @@ const CLIENT_LISTENER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // WebSocket (JS, TS, Dart, Swift, Go, Python, Kotlin)
     {
         type: "realtime",
         protocol: "websocket",
@@ -444,9 +652,38 @@ const CLIENT_LISTENER_PATTERNS = [
             line: findLineNumber(content, match.index),
         }),
     },
+    // Phoenix Channel Listener (JS / Dart / Swift)
+    {
+        type: "realtime",
+        protocol: "phoenix",
+        framework: "Phoenix Channels",
+        pattern: /\bchannel\.on\s*\(\s*["'`]([^"'`]+)["'`]/g,
+        extract: (match, content, file) => ({
+            event: match[1],
+            direction: "incoming",
+            file,
+            line: findLineNumber(content, match.index),
+        }),
+    },
+    // Dart / Flutter stream listener: channel.stream.listen / socket.on
+    {
+        type: "realtime",
+        protocol: "websocket",
+        framework: "Dart Stream",
+        pattern: /\b(?:channel\.stream|stream)\.listen\s*\(/g,
+        extract: (match, content, file) => ({
+            event: "message",
+            direction: "incoming",
+            file,
+            line: findLineNumber(content, match.index),
+        }),
+    },
 ];
 
 export async function extractClientTriggersAndListeners(files, projectRoot) {
+    if (projectRoot) {
+        setProjectRoot(projectRoot);
+    }
     const triggers = [];
     const listeners = [];
 
@@ -613,7 +850,7 @@ export function extractServerHandlerScopes(content, language, file) {
             }
         }
 
-        const flaskSocketIoRegex = /@(?:socketio|[A-Za-z0-9_]+)\.on\s*\(\s*["'`]([^"'`]+)["'`]\s*\)\s*(?:async\s+)?def\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*:/g;
+        const flaskSocketIoRegex = /@(?:socketio|sio|[A-Za-z0-9_]+)\.on\s*\(\s*["'`]([^"'`]+)["'`]\s*\)\s*(?:async\s+)?def\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*:/g;
         while ((match = flaskSocketIoRegex.exec(content)) !== null) {
             const event = match[1];
             const funcName = match[2];
@@ -649,7 +886,7 @@ export function extractServerHandlerScopes(content, language, file) {
             handlers.push({
                 type: "http",
                 protocol: "rest",
-                framework: "Flask/FastAPI",
+                framework: content.includes("FastAPI") || content.includes("fastapi") ? "FastAPI" : "Flask",
                 method,
                 path: routePath,
                 handler: `@app.${method.toLowerCase()}("${routePath}") ${funcName}`,
@@ -659,8 +896,8 @@ export function extractServerHandlerScopes(content, language, file) {
             });
         }
     } else if (language === "csharp") {
-        const hubMethodRegex = /public\s+(?:async\s+)?(?:Task|ValueTask|void)\s+([A-Z][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{/g;
         let match;
+        const hubMethodRegex = /public\s+(?:async\s+)?(?:Task|ValueTask|void)\s+([A-Z][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{/g;
         while ((match = hubMethodRegex.exec(content)) !== null) {
             const methodName = match[1];
             if (/^(OnConnectedAsync|OnDisconnectedAsync)$/.test(methodName)) continue;
@@ -684,9 +921,62 @@ export function extractServerHandlerScopes(content, language, file) {
                 }
             }
         }
+
+        const aspNetMethodRegex = /\[(HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch)\s*(?:\(\s*["']([^"']*)["']\s*\))?\][\s\S]*?public\s+(?:async\s+)?(?:IActionResult|ActionResult|Task<[^>]+>|void|[A-Za-z0-9_<>]+)\s+([A-Z][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{/g;
+        while ((match = aspNetMethodRegex.exec(content)) !== null) {
+            const method = match[1].replace("Http", "").toUpperCase();
+            const routePath = match[2] || "/";
+            const methodName = match[3];
+            const start = match.index;
+            const openBrace = content.indexOf("{", aspNetMethodRegex.lastIndex - 1);
+            if (openBrace !== -1) {
+                const closeBrace = findScopeEnd(content, openBrace);
+                if (closeBrace !== -1) {
+                    const body = content.slice(openBrace, closeBrace + 1);
+                    const line = findLineNumber(content, start);
+                    handlers.push({
+                        type: "http",
+                        protocol: "rest",
+                        framework: "ASP.NET Core",
+                        method,
+                        path: routePath,
+                        handler: `[${match[1]}("${routePath}")] ${methodName}`,
+                        file,
+                        line,
+                        body,
+                    });
+                }
+            }
+        }
+
+        const minimalApiRegex = /\bapp\.(MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*["']([^"']+)["']\s*,\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{/g;
+        while ((match = minimalApiRegex.exec(content)) !== null) {
+            const method = match[1].replace("Map", "").toUpperCase();
+            const routePath = match[2];
+            const start = match.index;
+            const openBrace = content.indexOf("{", minimalApiRegex.lastIndex - 1);
+            if (openBrace !== -1) {
+                const closeBrace = findScopeEnd(content, openBrace);
+                if (closeBrace !== -1) {
+                    const body = content.slice(openBrace, closeBrace + 1);
+                    const line = findLineNumber(content, start);
+                    handlers.push({
+                        type: "http",
+                        protocol: "rest",
+                        framework: "ASP.NET Minimal API",
+                        method,
+                        path: routePath,
+                        handler: `app.${match[1]}("${routePath}")`,
+                        file,
+                        line,
+                        body,
+                    });
+                }
+            }
+        }
     } else if (language === "go") {
-        const goRouteRegex = /\b(?:r|router|e|app)\.(GET|POST|PUT|PATCH|DELETE)\s*\(\s*["'`]([^"'`]+)["'`]\s*,\s*func\s*\([^)]*\)\s*\{/g;
         let match;
+        const goRouteRegex = /\b(?:r|router|e|app)\.(GET|POST|PUT|PATCH|DELETE|Get|Post|Put|Patch|Delete)\s*\(\s*["'`]([^"'`]+)["'`]\s*,\s*(?:func\s*\([^)]*\)\s*\{|[A-Za-z0-9_.]+)/g;
         while ((match = goRouteRegex.exec(content)) !== null) {
             const method = match[1].toUpperCase();
             const routePath = match[2];
@@ -711,8 +1001,34 @@ export function extractServerHandlerScopes(content, language, file) {
                 }
             }
         }
+
+        const goWsRegex = /func\s+([A-Za-z0-9_]*WebSocket[A-Za-z0-9_]*|[A-Za-z0-9_]*WsHandler[A-Za-z0-9_]*|handleWebSocket|handleWs)\s*\([^)]*\)\s*\{/g;
+        while ((match = goWsRegex.exec(content)) !== null) {
+            const funcName = match[1];
+            const start = match.index;
+            const openBrace = content.indexOf("{", goWsRegex.lastIndex - 1);
+            if (openBrace !== -1) {
+                const closeBrace = findScopeEnd(content, openBrace);
+                if (closeBrace !== -1) {
+                    const body = content.slice(openBrace, closeBrace + 1);
+                    const line = findLineNumber(content, start);
+                    const eventMatch = body.match(/case\s+["']([^"']+)["']|Type\s*==\s*["']([^"']+)["']|Event\s*==\s*["']([^"']+)["']/);
+                    const event = eventMatch ? (eventMatch[1] || eventMatch[2] || eventMatch[3]) : "message";
+                    handlers.push({
+                        type: "realtime",
+                        protocol: "websocket",
+                        framework: "Go WebSocket",
+                        event,
+                        handler: `${funcName}()`,
+                        file,
+                        line,
+                        body,
+                    });
+                }
+            }
+        }
     } else if (language === "java" || language === "kotlin") {
-        const springRegex = /@(PostMapping|GetMapping|PutMapping|DeleteMapping|PatchMapping|MessageMapping)\s*\(\s*(?:value\s*=\s*)?(?:["'`]([^"'`]+)["'`])?\s*\)[\s\S]*?(?:public|protected)?\s*(?:[A-Za-z0-9_<>[\]]+)\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*\{/g;
+        const springRegex = /@(PostMapping|GetMapping|PutMapping|DeleteMapping|PatchMapping|MessageMapping)\s*\(\s*(?:value\s*=\s*)?(?:["'`]([^"'`]+)["'`])?\s*\)[\s\S]*?(?:public|protected|private|fun)?\s*(?:[A-Za-z0-9_<>[\]]+)?\s*([A-Za-z0-9_]+)\s*\([^)]*\)\s*\{/g;
         let match;
         while ((match = springRegex.exec(content)) !== null) {
             const annotation = match[1];
@@ -753,6 +1069,314 @@ export function extractServerHandlerScopes(content, language, file) {
                 }
             }
         }
+
+        // Kotlin Ktor routes: get("path") { ... }, post("path") { ... }, webSocket("path") { ... }
+        if (language === "kotlin") {
+            const ktorRouteRegex = /\b(get|post|put|delete|patch|webSocket)\s*\(\s*["']([^"']+)["']\s*\)\s*\{/g;
+            while ((match = ktorRouteRegex.exec(content)) !== null) {
+                const methodOrWs = match[1];
+                const routePath = match[2];
+                const start = match.index;
+                const openBrace = content.indexOf("{", ktorRouteRegex.lastIndex - 1);
+                if (openBrace !== -1) {
+                    const closeBrace = findScopeEnd(content, openBrace);
+                    if (closeBrace !== -1) {
+                        const body = content.slice(openBrace, closeBrace + 1);
+                        const line = findLineNumber(content, start);
+                        if (methodOrWs === "webSocket") {
+                            handlers.push({
+                                type: "realtime",
+                                protocol: "websocket",
+                                framework: "Ktor",
+                                event: routePath,
+                                handler: `webSocket("${routePath}")`,
+                                file,
+                                line,
+                                body,
+                            });
+                        } else {
+                            handlers.push({
+                                type: "http",
+                                protocol: "rest",
+                                framework: "Ktor",
+                                method: methodOrWs.toUpperCase(),
+                                path: routePath,
+                                handler: `${methodOrWs}("${routePath}")`,
+                                file,
+                                line,
+                                body,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    } else if (language === "php") {
+        // Laravel: Route::get('path', ...), Route::post('path', ...)
+        const laravelRegex = /\bRoute::(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']\s*,\s*(?:function\s*\([^)]*\)\s*\{|\[[^\]]+\])/gi;
+        let match;
+        while ((match = laravelRegex.exec(content)) !== null) {
+            const method = match[1].toUpperCase();
+            const routePath = match[2];
+            const start = match.index;
+            const openBrace = content.indexOf("{", laravelRegex.lastIndex - 1);
+            let body = "";
+            if (openBrace !== -1) {
+                const closeBrace = findScopeEnd(content, openBrace);
+                if (closeBrace !== -1) {
+                    body = content.slice(openBrace, closeBrace + 1);
+                }
+            }
+            const line = findLineNumber(content, start);
+            handlers.push({
+                type: "http",
+                protocol: "rest",
+                framework: "Laravel",
+                method,
+                path: routePath,
+                handler: `Route::${match[1].toLowerCase()}("${routePath}")`,
+                file,
+                line,
+                body: body || content.slice(start, start + 300),
+            });
+        }
+    } else if (language === "ruby") {
+        // Rails routes & Sinatra: get "path", to: "controller#action" or get "path" do ... end
+        const rubyRouteRegex = /(?:^|\n)\s*(get|post|put|patch|delete)\s+["']([^"']+)["'](?:\s*,\s*to:\s*["']([^"']+)["']|\s+do)/gi;
+        let match;
+        while ((match = rubyRouteRegex.exec(content)) !== null) {
+            const method = match[1].toUpperCase();
+            const routePath = match[2];
+            const start = match.index;
+            const line = findLineNumber(content, start);
+            let body = "";
+            if (match[0].includes("do")) {
+                const bodyEnd = findRubyOrElixirScopeEnd(content, rubyRouteRegex.lastIndex);
+                body = content.slice(rubyRouteRegex.lastIndex, bodyEnd);
+            }
+            handlers.push({
+                type: "http",
+                protocol: "rest",
+                framework: "Rails/Sinatra",
+                method,
+                path: routePath,
+                handler: `${method} "${routePath}"`,
+                file,
+                line,
+                body: body || content,
+            });
+        }
+    } else if (language === "rust") {
+        // Actix-Web: #[get("path")], #[post("path")] async fn name(...) { ... }
+        const actixRegex = /#\[(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']\s*\)\]\s*(?:pub\s+)?async\s+fn\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*(?:->\s*[^{]+)?\{/g;
+        let match;
+        while ((match = actixRegex.exec(content)) !== null) {
+            const method = match[1].toUpperCase();
+            const routePath = match[2];
+            const funcName = match[3];
+            const start = match.index;
+            const openBrace = content.indexOf("{", start);
+            if (openBrace !== -1) {
+                const closeBrace = findScopeEnd(content, openBrace);
+                if (closeBrace !== -1) {
+                    const body = content.slice(openBrace, closeBrace + 1);
+                    const line = findLineNumber(content, start);
+                    handlers.push({
+                        type: "http",
+                        protocol: "rest",
+                        framework: "Actix-Web",
+                        method,
+                        path: routePath,
+                        handler: `#[${match[1]}("${routePath}")] ${funcName}`,
+                        file,
+                        line,
+                        body,
+                    });
+                }
+            }
+        }
+
+        // Axum: .route("path", get(handler).post(handler))
+        const axumRegex = /\.route\s*\(\s*["']([^"']+)["']\s*,\s*(get|post|put|delete|patch)\s*\(\s*([A-Za-z0-9_]+)\s*\)/g;
+        while ((match = axumRegex.exec(content)) !== null) {
+            const routePath = match[1];
+            const method = match[2].toUpperCase();
+            const handlerName = match[3];
+            const start = match.index;
+            const line = findLineNumber(content, start);
+            handlers.push({
+                type: "http",
+                protocol: "rest",
+                framework: "Axum",
+                method,
+                path: routePath,
+                handler: `route("${routePath}", ${match[2]}(${handlerName}))`,
+                file,
+                line,
+                body: content,
+            });
+        }
+    } else if (language === "swift") {
+        // Vapor: app.get("path") { req in ... } or routes.post("path") { req in ... }
+        const vaporRegex = /\b(?:app|routes)\.(get|post|put|patch|delete|webSocket)\s*\(\s*["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?\s*\)\s*\{/g;
+        let match;
+        while ((match = vaporRegex.exec(content)) !== null) {
+            const methodOrWs = match[1];
+            const segment1 = match[2];
+            const segment2 = match[3];
+            const routePath = segment2 ? `/${segment1}/${segment2}` : `/${segment1.replace(/^\//, "")}`;
+            const start = match.index;
+            const openBrace = content.indexOf("{", vaporRegex.lastIndex - 1);
+            if (openBrace !== -1) {
+                const closeBrace = findScopeEnd(content, openBrace);
+                if (closeBrace !== -1) {
+                    const body = content.slice(openBrace, closeBrace + 1);
+                    const line = findLineNumber(content, start);
+                    if (methodOrWs === "webSocket") {
+                        handlers.push({
+                            type: "realtime",
+                            protocol: "websocket",
+                            framework: "Vapor",
+                            event: routePath,
+                            handler: `webSocket("${routePath}")`,
+                            file,
+                            line,
+                            body,
+                        });
+                    } else {
+                        handlers.push({
+                            type: "http",
+                            protocol: "rest",
+                            framework: "Vapor",
+                            method: methodOrWs.toUpperCase(),
+                            path: routePath,
+                            handler: `app.${methodOrWs}("${routePath}")`,
+                            file,
+                            line,
+                            body,
+                        });
+                    }
+                }
+            }
+        }
+    } else if (language === "dart") {
+        // Shelf: router.get('path', handler) or router.post('path', (Request req) { ... })
+        const shelfRegex = /\brouter\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']/g;
+        let match;
+        while ((match = shelfRegex.exec(content)) !== null) {
+            const method = match[1].toUpperCase();
+            const routePath = match[2];
+            const start = match.index;
+            const line = findLineNumber(content, start);
+            const openBrace = content.indexOf("{", shelfRegex.lastIndex);
+            let body = "";
+            if (openBrace !== -1) {
+                const closeBrace = findScopeEnd(content, openBrace);
+                if (closeBrace !== -1) {
+                    body = content.slice(openBrace, closeBrace + 1);
+                }
+            }
+            handlers.push({
+                type: "http",
+                protocol: "rest",
+                framework: "Shelf",
+                method,
+                path: routePath,
+                handler: `router.${match[1]}("${routePath}")`,
+                file,
+                line,
+                body: body || content,
+            });
+        }
+    } else if (language === "scala") {
+        // Play Framework Action / Akka HTTP path("...")
+        const playRegex = /def\s+([A-Za-z0-9_]+)\s*=\s*Action(?:\.async)?\s*\{/g;
+        let match;
+        while ((match = playRegex.exec(content)) !== null) {
+            const actionName = match[1];
+            const start = match.index;
+            const openBrace = content.indexOf("{", playRegex.lastIndex - 1);
+            if (openBrace !== -1) {
+                const closeBrace = findScopeEnd(content, openBrace);
+                if (closeBrace !== -1) {
+                    const body = content.slice(openBrace, closeBrace + 1);
+                    const line = findLineNumber(content, start);
+                    handlers.push({
+                        type: "http",
+                        protocol: "rest",
+                        framework: "Play",
+                        method: "POST",
+                        path: `/${actionName.toLowerCase()}`,
+                        handler: `Action.${actionName}`,
+                        file,
+                        line,
+                        body,
+                    });
+                }
+            }
+        }
+
+        const akkaRegex = /path\s*\(\s*["']([^"']+)["']\s*\)\s*\{\s*(get|post|put|delete)/g;
+        while ((match = akkaRegex.exec(content)) !== null) {
+            const routePath = match[1];
+            const method = match[2].toUpperCase();
+            const start = match.index;
+            const line = findLineNumber(content, start);
+            handlers.push({
+                type: "http",
+                protocol: "rest",
+                framework: "Akka-HTTP",
+                method,
+                path: `/${routePath.replace(/^\//, "")}`,
+                handler: `path("${routePath}") { ${match[2]} }`,
+                file,
+                line,
+                body: content,
+            });
+        }
+    } else if (language === "elixir") {
+        // Phoenix Router: get "/path", Controller, :action
+        const phoenixRouteRegex = /(?:^|\n)\s*(get|post|put|patch|delete)\s+["']([^"']+)["']\s*,\s*([A-Za-z0-9_]+)\s*,\s*:([a-zA-Z0-9_]+)/g;
+        let match;
+        while ((match = phoenixRouteRegex.exec(content)) !== null) {
+            const method = match[1].toUpperCase();
+            const routePath = match[2];
+            const controller = match[3];
+            const action = match[4];
+            const start = match.index;
+            const line = findLineNumber(content, start);
+            handlers.push({
+                type: "http",
+                protocol: "rest",
+                framework: "Phoenix",
+                method,
+                path: routePath,
+                handler: `${controller}.${action}`,
+                file,
+                line,
+                body: content,
+            });
+        }
+
+        // Phoenix Channels: def handle_in("event", payload, socket) do ... end
+        const phoenixChannelRegex = /def\s+handle_in\s*\(\s*["']([^"']+)["']\s*,\s*([^,]+)\s*,\s*socket\s*\)\s*do/g;
+        while ((match = phoenixChannelRegex.exec(content)) !== null) {
+            const event = match[1];
+            const start = match.index;
+            const line = findLineNumber(content, start);
+            const bodyEnd = findRubyOrElixirScopeEnd(content, phoenixChannelRegex.lastIndex);
+            const body = content.slice(phoenixChannelRegex.lastIndex, bodyEnd);
+            handlers.push({
+                type: "realtime",
+                protocol: "phoenix",
+                framework: "Phoenix Channels",
+                event,
+                handler: `handle_in("${event}")`,
+                file,
+                line,
+                body,
+            });
+        }
     }
 
     return handlers;
@@ -785,6 +1409,9 @@ function pathsMatch(clientPath, serverPath) {
 }
 
 export async function buildCrossLayerFlows(files, projectRoot, options = {}) {
+    if (projectRoot) {
+        setProjectRoot(projectRoot);
+    }
     const protocolFilter = options.protocol && options.protocol !== "all"
         ? options.protocol.toLowerCase()
         : null;
@@ -813,13 +1440,19 @@ export async function buildCrossLayerFlows(files, projectRoot, options = {}) {
     const matchedServerHandlers = new Set();
     const matchedClientTriggers = new Set();
 
+    // 1. Real-time flows (socketio, signalr, websocket, phoenix)
     for (const trigger of clientTriggers) {
-        if (trigger.protocol === "socketio" || trigger.protocol === "signalr" || trigger.protocol === "websocket") {
+        if (
+            trigger.protocol === "socketio" ||
+            trigger.protocol === "signalr" ||
+            trigger.protocol === "websocket" ||
+            trigger.protocol === "phoenix"
+        ) {
             if (protocolFilter && trigger.protocol !== protocolFilter) continue;
 
             const matchingServer = serverHandlers.find((server) =>
                 server.type === "realtime" &&
-                server.event === trigger.event
+                (server.event === trigger.event || (server.protocol === "websocket" && trigger.protocol === "websocket"))
             );
 
             let databaseOperations = [];
@@ -833,7 +1466,7 @@ export async function buildCrossLayerFlows(files, projectRoot, options = {}) {
 
                 for (const outEvent of serverOutputs) {
                     const listenerMatches = clientListeners.filter((listener) =>
-                        listener.event === outEvent
+                        listener.event === outEvent || (trigger.protocol === "websocket" && listener.event === "message")
                     );
                     if (listenerMatches.length > 0) {
                         matchingClientListeners.push(outEvent);
@@ -875,6 +1508,7 @@ export async function buildCrossLayerFlows(files, projectRoot, options = {}) {
         }
     }
 
+    // 2. HTTP / REST flows
     for (const trigger of clientTriggers) {
         if (trigger.type === "http" && trigger.protocol === "rest") {
             if (protocolFilter && protocolFilter !== "rest" && protocolFilter !== "http") continue;
@@ -896,7 +1530,7 @@ export async function buildCrossLayerFlows(files, projectRoot, options = {}) {
 
                 for (const outEvent of serverOutputs) {
                     const listenerMatches = clientListeners.filter((listener) =>
-                        listener.event === outEvent
+                        listener.event === outEvent || listener.event === "message"
                     );
                     if (listenerMatches.length > 0) {
                         matchingClientListeners.push(outEvent);
@@ -928,6 +1562,7 @@ export async function buildCrossLayerFlows(files, projectRoot, options = {}) {
         }
     }
 
+    // 3. GraphQL & gRPC flows
     for (const trigger of clientTriggers) {
         if (trigger.protocol === "graphql" || trigger.protocol === "grpc") {
             if (protocolFilter && trigger.protocol !== protocolFilter) continue;
@@ -988,6 +1623,7 @@ export async function buildCrossLayerFlows(files, projectRoot, options = {}) {
         }
     }
 
+    // 4. Unmatched server handlers
     for (const server of serverHandlers) {
         if (!matchedServerHandlers.has(server)) {
             if (protocolFilter && server.protocol !== protocolFilter) continue;
@@ -998,7 +1634,7 @@ export async function buildCrossLayerFlows(files, projectRoot, options = {}) {
 
             for (const outEvent of serverOutputs) {
                 const listenerMatches = clientListeners.filter((listener) =>
-                    listener.event === outEvent
+                    listener.event === outEvent || listener.event === "message"
                 );
                 if (listenerMatches.length > 0) {
                     matchingClientListeners.push(outEvent);
