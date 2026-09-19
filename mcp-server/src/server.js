@@ -12,6 +12,7 @@ import { registerDiscoverInterfacesTool } from "./tools/discoverInterfaces.js";
 import { registerMapInterfacesTool } from "./tools/mapInterfaces.js";
 import { registerAnalyzeDataFlowTool } from "./tools/analyzeDataFlow.js";
 import { registerMapCrossLayerFlowsTool } from "./tools/mapCrossLayerFlows.js";
+import { registerValidateCrossLayerFlowsTool } from "./tools/validateCrossLayerFlows.js";
 
 export async function createServer(){
     const server = new McpServer({
@@ -31,6 +32,7 @@ export async function createServer(){
     registerMapInterfacesTool(server);
     registerAnalyzeDataFlowTool(server);
     registerMapCrossLayerFlowsTool(server);
+    registerValidateCrossLayerFlowsTool(server);
 
     const transport = new StdioServerTransport();
 
